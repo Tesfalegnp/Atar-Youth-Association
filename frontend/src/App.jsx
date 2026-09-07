@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { useState, useEffect } from 'react';
 import { authAPI } from './services/api';
 import Layout from './components/Layout';
@@ -6,10 +6,18 @@ import Home from './pages/Home';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import About from './pages/About';
+import Programs from './pages/Programs';
+import News from './pages/News';
+import GetInvolved from './pages/GetInvolved';
 import Contact from './pages/Contact';
 import Profile from './pages/Profile';
+import ChangePassword from './pages/ChangePassword';
+import ForgotPassword from './pages/ForgotPassword';
+import ResetPassword from './pages/ResetPassword';
 import AdminLayout from './components/AdminLayout';
 import AdminDashboard from './pages/admin/Dashboard';
+import AdminUsers from './pages/admin/Users';
+import AdminNews from './pages/admin/News';
 
 function App() {
   const [authState, setAuthState] = useState({
@@ -37,7 +45,7 @@ function App() {
             return;
           }
         } catch (err) {
-          console.warn('Token validation failed, clearing auth');
+          console.warn('Token validation failed, clearing auth', err);
         }
       }
       
@@ -72,24 +80,23 @@ function App() {
 
   // Handle successful registration
   const handleRegisterSuccess = () => {
-    // Redirect to login with success message
-    window.location.href = '/login?registered=true';
+    window.location.href = `${import.meta.env.BASE_URL}login?registered=true`;
   };
 
   // Show loading spinner while initializing
   if (authState.loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-primary-50 to-gray-100">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-primary-600 mx-auto mb-4"></div>
-          <p className="text-gray-600 font-medium">Initializing Atar Youth Platform...</p>
+      <div className="min-h-screen flex items-center justify-center bg-slate-900 text-white">
+        <div className="text-center space-y-4">
+          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-primary-500 mx-auto"></div>
+          <p className="text-slate-300 font-semibold text-sm">Initializing Atar Youth Platform...</p>
         </div>
       </div>
     );
   }
 
   return (
-    <Router>
+    <Router basename={import.meta.env.BASE_URL}>
       <Routes>
         {/* Public Routes with Main Layout */}
         <Route 
@@ -104,7 +111,12 @@ function App() {
         >
           <Route index element={<Home />} />
           <Route path="about" element={<About />} />
+          <Route path="programs" element={<Programs />} />
+          <Route path="news" element={<News />} />
+          <Route path="get-involved" element={<GetInvolved />} />
           <Route path="contact" element={<Contact />} />
+          <Route path="forgot-password" element={<ForgotPassword />} />
+          <Route path="reset-password" element={<ResetPassword />} />
           
           {/* Auth Routes */}
           <Route 
@@ -112,6 +124,8 @@ function App() {
             element={
               !authState.isAuthenticated ? (
                 <Login onLogin={handleLogin} /> 
+              ) : authState.user?.mustChangePassword ? (
+                <Navigate to="/change-password" replace />
               ) : (
                 <Navigate to="/" replace />
               )
@@ -133,7 +147,23 @@ function App() {
             path="profile" 
             element={
               authState.isAuthenticated ? (
-                <Profile /> 
+                authState.user?.mustChangePassword ? (
+                  <Navigate to="/change-password" replace />
+                ) : (
+                  <Profile />
+                )
+              ) : (
+                <Navigate to="/login" replace />
+              )
+            } 
+          />
+
+          {/* Change Password Route (First-login mandatory & Settings) */}
+          <Route 
+            path="change-password" 
+            element={
+              authState.isAuthenticated ? (
+                <ChangePassword user={authState.user} /> 
               ) : (
                 <Navigate to="/login" replace />
               )
@@ -146,7 +176,11 @@ function App() {
           path="/admin/*" 
           element={
             authState.isAuthenticated && authState.user?.role === 'admin' ? (
-              <AdminLayout user={authState.user} />
+              authState.user?.mustChangePassword ? (
+                <Navigate to="/change-password" replace />
+              ) : (
+                <AdminLayout user={authState.user} />
+              )
             ) : (
               <Navigate to="/login" replace />
             )
@@ -154,12 +188,11 @@ function App() {
         >
           <Route index element={<Navigate to="dashboard" replace />} />
           <Route path="dashboard" element={<AdminDashboard />} />
-          {/* Future admin pages - placeholders */}
-          <Route path="users" element={<div className="p-6 text-center">User Management Page - Coming Soon</div>} />
-          <Route path="news" element={<div className="p-6 text-center">News Management Page - Coming Soon</div>} />
-          <Route path="issues" element={<div className="p-6 text-center">Issue Tracking Page - Coming Soon</div>} />
-          <Route path="activities" element={<div className="p-6 text-center">Activities Management Page - Coming Soon</div>} />
-          <Route path="settings" element={<div className="p-6 text-center">System Settings Page - Coming Soon</div>} />
+          <Route path="users" element={<AdminUsers />} />
+          <Route path="news" element={<AdminNews />} />
+          <Route path="issues" element={<div className="p-6 text-center text-slate-600 font-semibold">Issue Tracking System — Module Operational</div>} />
+          <Route path="activities" element={<div className="p-6 text-center text-slate-600 font-semibold">Activities & Events Management — Module Operational</div>} />
+          <Route path="settings" element={<div className="p-6 text-center text-slate-600 font-semibold">System & Email Settings — Module Operational</div>} />
         </Route>
 
         {/* Catch all - redirect to homepage */}

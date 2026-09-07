@@ -1,23 +1,28 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { pool } = require('../config/database');
 const { upload, handleUploadError } = require('../middleware/upload');
 const { optimizeImage, cleanupOldImages } = require('../utils/imageOptimizer');
-const fs = require('fs').promises;
+const { generateTemporaryPassword } = require('../utils/passwordGenerator');
+const { sendWelcomeEmail, sendPasswordResetEmail } = require('../services/emailService');
 require('dotenv').config();
 
+// Helper: Resolve Client Base URL
+const getClientUrl = () => process.env.CLIENT_URL || process.env.APP_URL || 'http://localhost:3000';
+
 // ========================================
-// PROFILE FETCH (Existing - Enhanced)
+// PROFILE FETCH
 // ========================================
 const getProfile = async (req, res) => {
   try {
-    const [userRows] = await pool.query(
-      `SELECT u.id, u.email, u.role, u.phone, u.status, 
+    const { rows: userRows } = await pool.query(
+      `SELECT u.id, u.email, u.role, u.phone, u.status, u.must_change_password,
               p.full_name, p.gender, p.date_of_birth, p.county, p.payam, 
               p.bio, p.profile_photo_url
        FROM users u
        LEFT JOIN profiles p ON u.id = p.user_id
-       WHERE u.id = ?`,
+       WHERE u.id = $1`,
       [req.user.id]
     );
 
@@ -29,7 +34,7 @@ const getProfile = async (req, res) => {
     const firstName = user.full_name ? user.full_name.split(' ')[0] : 'User';
     const photoUrl = user.profile_photo_url 
       ? (user.profile_photo_url.startsWith('http') ? user.profile_photo_url : `/uploads${user.profile_photo_url}`)
-      : `https://ui-avatars.com/api/?name=${encodeURIComponent(firstName)}&background=0ea5e9&color=fff&size=150`;
+      : `https://ui-avatars.com/api/?name=${encodeURIComponent(firstName)}&background=0284c7&color=fff&size=150`;
 
     res.json({
       success: true,
@@ -39,6 +44,7 @@ const getProfile = async (req, res) => {
         role: user.role,
         phone: user.phone,
         status: user.status,
+        mustChangePassword: user.must_change_password || false,
         firstName,
         profile: {
           fullName: user.full_name || 'User',
@@ -58,52 +64,64 @@ const getProfile = async (req, res) => {
 };
 
 // ========================================
-// REGISTER (Instant Activation - Existing)
+// REGISTER (Without Password Prompt)
 // ========================================
 const registerUser = async (req, res) => {
   try {
-    const { email, phone, password, full_name, gender, date_of_birth, county, payam } = req.body;
+    const { email, phone, full_name, gender, date_of_birth, county, payam } = req.body;
 
-    if (!email || !phone || !password || !full_name || !gender || !date_of_birth || !county || !payam) {
-      return res.status(400).json({ success: false, message: 'All fields are required' });
+    if (!email || !phone || !full_name || !gender || !date_of_birth || !county || !payam) {
+      return res.status(400).json({ success: false, message: 'All registration fields are required' });
     }
 
-    // South Sudan phone validation
+    // South Sudan phone format check (+211XXXXXXXXX)
     if (!/^\+211\d{9}$/.test(phone)) {
       return res.status(400).json({ success: false, message: 'Invalid South Sudan phone format (+211XXXXXXXXX)' });
     }
 
-    // Check existing user
-    const [existing] = await pool.query(
-      'SELECT id FROM users WHERE email = ? OR phone = ?',
+    // Check existing account
+    const { rows: existing } = await pool.query(
+      'SELECT id FROM users WHERE email = $1 OR phone = $2',
       [email, phone]
     );
 
     if (existing.length > 0) {
-      return res.status(400).json({ success: false, message: 'Email or phone already registered' });
+      return res.status(400).json({ success: false, message: 'Email or phone number is already registered' });
     }
 
-    // Hash password
+    // Generate Temporary Password (MiddleName + A123)
+    const { temporaryPassword } = generateTemporaryPassword(full_name);
+
+    // Hash temporary password
     const salt = await bcrypt.genSalt(parseInt(process.env.BCRYPT_ROUNDS) || 12);
-    const passwordHash = await bcrypt.hash(password, salt);
+    const passwordHash = await bcrypt.hash(temporaryPassword, salt);
 
-    // CREATE USER WITH 'active' STATUS (NO APPROVAL)
-    const [result] = await pool.query(
-      'INSERT INTO users (email, phone, password_hash, role, status, is_email_verified) VALUES (?, ?, ?, ?, ?, ?)',
-      [email, phone, passwordHash, 'user', 'active', true]
+    // Insert user with must_change_password = TRUE
+    const userResult = await pool.query(
+      `INSERT INTO users (email, phone, password_hash, role, status, must_change_password, is_email_verified) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [email.trim().toLowerCase(), phone.trim(), passwordHash, 'user', 'active', true, true]
     );
 
-    const userId = result.insertId;
+    const userId = userResult.rows[0].id;
 
-    // Create profile
+    // Insert profile
     await pool.query(
-      'INSERT INTO profiles (user_id, full_name, gender, date_of_birth, county, payam) VALUES (?, ?, ?, ?, ?, ?)',
-      [userId, full_name, gender, date_of_birth, county, payam]
+      'INSERT INTO profiles (user_id, full_name, gender, date_of_birth, county, payam) VALUES ($1, $2, $3, $4, $5, $6)',
+      [userId, full_name.trim(), gender, date_of_birth, county.trim(), payam.trim()]
     );
+
+    // Dispatch Welcome Email asynchronously
+    sendWelcomeEmail({
+      email: email.trim().toLowerCase(),
+      fullName: full_name.trim(),
+      temporaryPassword,
+      loginUrl: `${getClientUrl()}/login`
+    }).catch(err => console.error('Failed to send registration email:', err));
 
     res.status(201).json({ 
       success: true, 
-      message: 'Registration successful! Please login to continue.',
+      message: 'Registration successful! Your login credentials have been sent to your email address.',
       redirect: '/login'
     });
 
@@ -114,20 +132,26 @@ const registerUser = async (req, res) => {
 };
 
 // ========================================
-// LOGIN (With Profile Data - Existing)
+// LOGIN
 // ========================================
 const loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
 
     if (!email || !password) {
-      return res.status(400).json({ success: false, message: 'Email and password required' });
+      return res.status(400).json({ success: false, message: 'Email/Phone and password are required' });
     }
 
-    // Find user (match email OR phone)
-    const [users] = await pool.query(
-      'SELECT * FROM users WHERE email = ? OR phone = ?',
-      [email, email]
+    const cleanInput = email.trim();
+
+    // Find user by email or phone
+    const { rows: users } = await pool.query(
+      `SELECT u.id, u.email, u.phone, u.password_hash, u.role, u.status, u.must_change_password,
+              p.full_name, p.profile_photo_url
+       FROM users u
+       LEFT JOIN profiles p ON u.id = p.user_id
+       WHERE u.email = $1 OR u.phone = $2`,
+      [cleanInput.toLowerCase(), cleanInput]
     );
 
     if (users.length === 0) {
@@ -136,41 +160,39 @@ const loginUser = async (req, res) => {
 
     const user = users[0];
 
-    // Block inactive accounts
+    // Check account status
     if (user.status !== 'active') {
       return res.status(403).json({ 
         success: false, 
-        message: 'Account is deactivated. Contact administrator.' 
+        message: `Account is currently ${user.status}. Please contact an administrator.` 
       });
     }
 
-    // Verify password
+    // Verify bcrypt password
     const isValid = await bcrypt.compare(password, user.password_hash);
     if (!isValid) {
       return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
-    // Generate JWT
+    // Generate JWT payload including must_change_password
     const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
+      { 
+        id: user.id, 
+        email: user.email, 
+        role: user.role,
+        must_change_password: user.must_change_password || false
+      },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRE || '7d' }
     );
 
-    // Update last login
-    await pool.query('UPDATE users SET last_login_at = NOW() WHERE id = ?', [user.id]);
+    // Update last login timestamp
+    await pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
 
-    // Fetch profile data
-    const [profileRows] = await pool.query(
-      `SELECT full_name, profile_photo_url FROM profiles WHERE user_id = ?`,
-      [user.id]
-    );
-
-    const profile = profileRows[0] || {};
-    const firstName = profile.full_name ? profile.full_name.split(' ')[0] : 'User';
-    const photoUrl = profile.profile_photo_url 
-      ? (profile.profile_photo_url.startsWith('http') ? profile.profile_photo_url : `/uploads${profile.profile_photo_url}`)
-      : `https://ui-avatars.com/api/?name=${encodeURIComponent(firstName)}&background=0ea5e9&color=fff&size=150`;
+    const firstName = user.full_name ? user.full_name.split(' ')[0] : 'User';
+    const photoUrl = user.profile_photo_url 
+      ? (user.profile_photo_url.startsWith('http') ? user.profile_photo_url : `/uploads${user.profile_photo_url}`)
+      : `https://ui-avatars.com/api/?name=${encodeURIComponent(firstName)}&background=0284c7&color=fff&size=150`;
 
     res.json({ 
       success: true,
@@ -180,6 +202,7 @@ const loginUser = async (req, res) => {
         id: user.id,
         email: user.email,
         role: user.role,
+        mustChangePassword: user.must_change_password || false,
         firstName,
         profilePhotoUrl: photoUrl
       }
@@ -192,7 +215,244 @@ const loginUser = async (req, res) => {
 };
 
 // ========================================
-// UPDATE PROFILE (NEW - With Photo Handling)
+// CHANGE / UPDATE PASSWORD (First Login & Settings)
+// ========================================
+const updatePassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword, confirmPassword } = req.body;
+    const userId = req.user.id;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Current password and new password are required' 
+      });
+    }
+
+    if (confirmPassword && newPassword !== confirmPassword) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'New password and confirmation do not match' 
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'New password must be at least 6 characters long' 
+      });
+    }
+
+    // Fetch user hash
+    const { rows: users } = await pool.query(
+      'SELECT email, role, password_hash FROM users WHERE id = $1',
+      [userId]
+    );
+
+    if (users.length === 0) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const user = users[0];
+
+    // Verify current/temporary password
+    const isValid = await bcrypt.compare(currentPassword, user.password_hash);
+    if (!isValid) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Current/temporary password is incorrect' 
+      });
+    }
+
+    // Prevent new password being identical to current password
+    const isSamePassword = await bcrypt.compare(newPassword, user.password_hash);
+    if (isSamePassword) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'New password must be different from your current/temporary password' 
+      });
+    }
+
+    // Hash new password
+    const salt = await bcrypt.genSalt(parseInt(process.env.BCRYPT_ROUNDS) || 12);
+    const newPasswordHash = await bcrypt.hash(newPassword, salt);
+
+    // Update database: must_change_password = FALSE
+    await pool.query(
+      `UPDATE users 
+       SET password_hash = $1, must_change_password = FALSE, password_changed_at = NOW(), updated_at = NOW() 
+       WHERE id = $2`,
+      [newPasswordHash, userId]
+    );
+
+    // Generate fresh JWT token with must_change_password = false
+    const freshToken = jwt.sign(
+      { 
+        id: userId, 
+        email: user.email, 
+        role: user.role,
+        must_change_password: false
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE || '7d' }
+    );
+
+    res.json({ 
+      success: true, 
+      message: 'Password updated successfully!',
+      token: freshToken,
+      mustChangePassword: false
+    });
+
+  } catch (error) {
+    console.error('Password update error:', error);
+    res.status(500).json({ success: false, message: 'Failed to update password' });
+  }
+};
+
+// ========================================
+// FORGOT PASSWORD REQUEST
+// ========================================
+const requestPasswordReset = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email address is required' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+
+    // Standard non-enumerating success response
+    const genericResponse = {
+      success: true,
+      message: 'If an account matches the email provided, password reset instructions have been sent.'
+    };
+
+    // Find user
+    const { rows: users } = await pool.query(
+      `SELECT u.id, u.email, p.full_name 
+       FROM users u 
+       LEFT JOIN profiles p ON u.id = p.user_id 
+       WHERE u.email = $1 AND u.status = 'active'`,
+      [cleanEmail]
+    );
+
+    if (users.length === 0) {
+      return res.json(genericResponse);
+    }
+
+    const user = users[0];
+
+    // Generate cryptographically secure random token (32 bytes = 64 hex chars)
+    const resetToken = crypto.randomBytes(32).toString('hex');
+
+    // Hash token with SHA-256 for database storage
+    const tokenHash = crypto.createHash('sha256').update(resetToken).digest('hex');
+
+    // Token expires in 1 hour
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+    // Invalidate existing reset tokens for this user
+    await pool.query(
+      `UPDATE password_reset_tokens SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL`,
+      [user.id]
+    );
+
+    // Store token hash in database
+    await pool.query(
+      `INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
+      [user.id, tokenHash, expiresAt]
+    );
+
+    // Send Password Reset Email
+    const resetUrl = `${getClientUrl()}/reset-password?token=${resetToken}`;
+    sendPasswordResetEmail({
+      email: user.email,
+      fullName: user.full_name || 'Member',
+      resetUrl,
+      expiresMinutes: 60
+    }).catch(err => console.error('Reset email error:', err));
+
+    res.json(genericResponse);
+
+  } catch (error) {
+    console.error('Password reset request error:', error);
+    res.status(500).json({ success: false, message: 'Failed to process password reset request' });
+  }
+};
+
+// ========================================
+// RESET PASSWORD (WITH TOKEN)
+// ========================================
+const resetPasswordWithToken = async (req, res) => {
+  try {
+    const { token, newPassword, confirmPassword } = req.body;
+
+    if (!token || !newPassword) {
+      return res.status(400).json({ success: false, message: 'Token and new password are required' });
+    }
+
+    if (confirmPassword && newPassword !== confirmPassword) {
+      return res.status(400).json({ success: false, message: 'New password and confirmation do not match' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ success: false, message: 'New password must be at least 6 characters long' });
+    }
+
+    // Hash incoming token to match stored hash
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+
+    // Query active reset token
+    const { rows: tokenRows } = await pool.query(
+      `SELECT id, user_id FROM password_reset_tokens 
+       WHERE token_hash = $1 AND expires_at > NOW() AND used_at IS NULL`,
+      [tokenHash]
+    );
+
+    if (tokenRows.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Invalid or expired password reset token. Please request a new one.' 
+      });
+    }
+
+    const resetRecord = tokenRows[0];
+    const userId = resetRecord.user_id;
+
+    // Hash new password
+    const salt = await bcrypt.genSalt(parseInt(process.env.BCRYPT_ROUNDS) || 12);
+    const newPasswordHash = await bcrypt.hash(newPassword, salt);
+
+    // Update user password and set must_change_password = FALSE
+    await pool.query(
+      `UPDATE users 
+       SET password_hash = $1, must_change_password = FALSE, password_changed_at = NOW(), updated_at = NOW() 
+       WHERE id = $2`,
+      [newPasswordHash, userId]
+    );
+
+    // Mark token as used
+    await pool.query(
+      `UPDATE password_reset_tokens SET used_at = NOW() WHERE id = $1`,
+      [resetRecord.id]
+    );
+
+    res.json({
+      success: true,
+      message: 'Password reset successfully! You can now log in with your new password.',
+      redirect: '/login'
+    });
+
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({ success: false, message: 'Failed to reset password' });
+  }
+};
+
+// ========================================
+// UPDATE PROFILE
 // ========================================
 const updateProfile = async (req, res) => {
   try {
@@ -202,65 +462,30 @@ const updateProfile = async (req, res) => {
       phone, email 
     } = req.body;
 
-    // Validate required fields
     if (!full_name || !gender || !date_of_birth || !county || !payam) {
-      return res.status(400).json({ success: false, message: 'Missing required fields' });
+      return res.status(400).json({ success: false, message: 'Missing required profile fields' });
     }
 
-    // Validate South Sudan phone format if provided
     if (phone && !/^\+211\d{9}$/.test(phone)) {
       return res.status(400).json({ success: false, message: 'Invalid South Sudan phone format (+211XXXXXXXXX)' });
-    }
-
-    // Check email/phone uniqueness if changed
-    if (email || phone) {
-      let conditions = [];
-      let params = [];
-      
-      if (email && email !== req.user.email) {
-        conditions.push('(email = ? AND id != ?)');
-        params.push(email, userId);
-      }
-      if (phone && phone !== req.user.phone) {
-        conditions.push('(phone = ? AND id != ?)');
-        params.push(phone, userId);
-      }
-      
-      if (conditions.length > 0) {
-        const [existing] = await pool.query(
-          `SELECT id FROM users WHERE ${conditions.join(' OR ')}`,
-          params
-        );
-        if (existing.length > 0) {
-          return res.status(400).json({ 
-            success: false, 
-            message: 'Email or phone already in use by another account' 
-          });
-        }
-      }
     }
 
     // Handle photo upload
     let photoUrls = null;
     if (req.file) {
       try {
-        // Get current profile photo path for cleanup
-        const [currentProfile] = await pool.query(
-          'SELECT profile_photo_url FROM profiles WHERE user_id = ?',
+        const { rows: currentProfile } = await pool.query(
+          'SELECT profile_photo_url FROM profiles WHERE user_id = $1',
           [userId]
         );
         
-        // Optimize new image
         photoUrls = await optimizeImage(req.file.path, userId);
         
-        // Cleanup old images ONLY if they are local paths (not external URLs)
         if (currentProfile[0]?.profile_photo_url && !currentProfile[0].profile_photo_url.startsWith('http')) {
           await cleanupOldImages(currentProfile[0].profile_photo_url);
         }
       } catch (err) {
-        console.error('Photo processing error:', err);
-        // Continue without photo update if processing fails
-        console.warn('Profile photo update skipped due to processing error');
+        console.warn('Profile photo update skipped due to image processing error:', err.message);
       }
     }
 
@@ -268,52 +493,64 @@ const updateProfile = async (req, res) => {
     if (phone || email) {
       const updates = [];
       const values = [];
+      let paramIdx = 1;
       
       if (phone) {
-        updates.push('phone = ?');
+        updates.push(`phone = $${paramIdx++}`);
         values.push(phone);
       }
       if (email) {
-        updates.push('email = ?');
-        values.push(email);
+        updates.push(`email = $${paramIdx++}`);
+        values.push(email.trim().toLowerCase());
       }
       
       if (updates.length > 0) {
         values.push(userId);
         await pool.query(
-          `UPDATE users SET ${updates.join(', ')} WHERE id = ?`,
+          `UPDATE users SET ${updates.join(', ')}, updated_at = NOW() WHERE id = $${paramIdx}`,
           values
         );
       }
     }
 
     // Update profiles table
-    const profileUpdate = {
-      full_name: full_name.trim(),
+    const setClauses = [
+      'full_name = $1',
+      'gender = $2',
+      'date_of_birth = $3',
+      'county = $4',
+      'payam = $5',
+      'bio = $6',
+      'updated_at = NOW()'
+    ];
+    const setParams = [
+      full_name.trim(),
       gender,
       date_of_birth,
-      county: county.trim(),
-      payam: payam.trim(),
-      bio: bio ? bio.trim() : null
-    };
-    
+      county.trim(),
+      payam.trim(),
+      bio ? bio.trim() : null
+    ];
+
     if (photoUrls?.originalUrl) {
-      profileUpdate.profile_photo_url = photoUrls.originalUrl;
+      setClauses.push(`profile_photo_url = $${setParams.length + 1}`);
+      setParams.push(photoUrls.originalUrl);
     }
 
+    setParams.push(userId);
     await pool.query(
-      'UPDATE profiles SET ? WHERE user_id = ?',
-      [profileUpdate, userId]
+      `UPDATE profiles SET ${setClauses.join(', ')} WHERE user_id = $${setParams.length}`,
+      setParams
     );
 
-    // Fetch updated profile
-    const [updated] = await pool.query(
-      `SELECT u.id, u.email, u.phone, u.role, 
+    // Fetch updated user profile
+    const { rows: updated } = await pool.query(
+      `SELECT u.id, u.email, u.phone, u.role, u.must_change_password,
               p.full_name, p.gender, p.date_of_birth, p.county, p.payam, 
               p.bio, p.profile_photo_url
        FROM users u
        LEFT JOIN profiles p ON u.id = p.user_id
-       WHERE u.id = ?`,
+       WHERE u.id = $1`,
       [userId]
     );
 
@@ -331,6 +568,7 @@ const updateProfile = async (req, res) => {
         email: user.email,
         phone: user.phone,
         role: user.role,
+        mustChangePassword: user.must_change_password || false,
         firstName,
         profile: {
           fullName: user.full_name,
@@ -351,76 +589,6 @@ const updateProfile = async (req, res) => {
 };
 
 // ========================================
-// UPDATE PASSWORD (NEW)
-// ========================================
-const updatePassword = async (req, res) => {
-  try {
-    const { currentPassword, newPassword } = req.body;
-    const userId = req.user.id;
-
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Current and new password required' 
-      });
-    }
-
-    if (newPassword.length < 6) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'New password must be at least 6 characters' 
-      });
-    }
-
-    // Verify current password
-    const [users] = await pool.query(
-      'SELECT password_hash FROM users WHERE id = ?',
-      [userId]
-    );
-
-    if (users.length === 0) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-
-    const isValid = await bcrypt.compare(currentPassword, users[0].password_hash);
-    if (!isValid) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Current password is incorrect' 
-      });
-    }
-
-    // Prevent reusing same password
-    const isSamePassword = await bcrypt.compare(newPassword, users[0].password_hash);
-    if (isSamePassword) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'New password must be different from current password' 
-      });
-    }
-
-    // Hash new password
-    const salt = await bcrypt.genSalt(parseInt(process.env.BCRYPT_ROUNDS) || 12);
-    const newPasswordHash = await bcrypt.hash(newPassword, salt);
-
-    // Update password
-    await pool.query(
-      'UPDATE users SET password_hash = ?, last_login_at = NULL WHERE id = ?',
-      [newPasswordHash, userId]
-    );
-
-    res.json({ 
-      success: true, 
-      message: 'Password updated successfully. Please login again.' 
-    });
-
-  } catch (error) {
-    console.error('Password update error:', error);
-    res.status(500).json({ success: false, message: 'Failed to update password' });
-  }
-};
-
-// ========================================
 // EXPORTS
 // ========================================
 module.exports = { 
@@ -429,6 +597,8 @@ module.exports = {
   getProfile, 
   updateProfile, 
   updatePassword,
+  requestPasswordReset,
+  resetPasswordWithToken,
   upload, 
   handleUploadError 
 };
