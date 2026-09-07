@@ -187,7 +187,11 @@ const loginUser = async (req, res) => {
     );
 
     // Update last login timestamp
-    await pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
+    try {
+      await pool.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
+    } catch (dbErr) {
+      console.warn('Could not update last_login_at:', dbErr.message);
+    }
 
     const firstName = user.full_name ? user.full_name.split(' ')[0] : 'User';
     const photoUrl = user.profile_photo_url 

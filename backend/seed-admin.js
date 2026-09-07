@@ -9,6 +9,7 @@ const seedAdmin = async () => {
       ALTER TABLE users 
       ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
       ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
     `);
 
