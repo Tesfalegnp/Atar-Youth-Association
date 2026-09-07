@@ -2,7 +2,7 @@
 const bcrypt = require('bcryptjs');
 const { pool } = require('./src/config/database');
 
-const createAdmin = async () => {
+const seedAdmin = async () => {
   try {
     const adminEmail = process.env.ADMIN_EMAIL || 'admin@ataryouth.org';
     const adminPassword = process.env.ADMIN_PASSWORD || '1234';
@@ -18,19 +18,19 @@ const createAdmin = async () => {
     const adminHash = await bcrypt.hash(adminPassword, salt);
 
     if (existing.length > 0) {
-      // Ensure password hash is updated to valid hash
+      // Ensure password hash & must_change_password status are updated
       await pool.query(
-        'UPDATE users SET password_hash = $1 WHERE email = $2',
+        'UPDATE users SET password_hash = $1, must_change_password = FALSE WHERE email = $2',
         [adminHash, adminEmail]
       );
-      console.log('✅ Admin account exists and password hash updated');
-      process.exit(0);
+      console.log('✅ Admin account verified and password hash updated');
+      return;
     }
 
     // Create admin user
     const userResult = await pool.query(
-      `INSERT INTO users (email, phone, password_hash, role, status, is_email_verified, is_phone_verified) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      `INSERT INTO users (email, phone, password_hash, role, status, is_email_verified, is_phone_verified, must_change_password) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
       [
         adminEmail,
         '+211912345678',
@@ -38,7 +38,8 @@ const createAdmin = async () => {
         'admin',
         'active',
         true,
-        true
+        true,
+        false
       ]
     );
 
@@ -47,7 +48,8 @@ const createAdmin = async () => {
     // Create admin profile
     await pool.query(
       `INSERT INTO profiles (user_id, full_name, gender, date_of_birth, county, payam, bio) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (user_id) DO NOTHING`,
       [
         adminId,
         'System Administrator',
@@ -61,19 +63,20 @@ const createAdmin = async () => {
 
     console.log('✅ ADMIN ACCOUNT CREATED SUCCESSFULLY');
     console.log(`   Username: ${adminEmail}`);
-    console.log('   ⚠️  CHANGE PASSWORD AFTER FIRST LOGIN!');
-    process.exit(0);
   } catch (error) {
-    console.error('❌ Admin creation failed:', error.message);
-    process.exit(1);
+    console.warn('⚠️ Admin seeding warning:', error.message);
   }
 };
 
-// Initialize DB and create admin
-require('dotenv').config();
-const { testConnection } = require('./src/config/database');
+// Run standalone if executed directly via CLI
+if (require.main === module) {
+  require('dotenv').config();
+  const { testConnection } = require('./src/config/database');
+  (async () => {
+    await testConnection();
+    await seedAdmin();
+    process.exit(0);
+  })();
+}
 
-(async () => {
-  await testConnection();
-  await createAdmin();
-})();
+module.exports = { seedAdmin };

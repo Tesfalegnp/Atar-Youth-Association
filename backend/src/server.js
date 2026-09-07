@@ -24,8 +24,12 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 // Serve static uploaded files (profile photos & thumbnails)
 app.use('/uploads', express.static(path.join(__dirname, '../public/uploads')));
 
-// Test DB connection
-testConnection();
+// Test DB connection & ensure admin account exists
+const { seedAdmin } = require('../seed-admin');
+(async () => {
+  await testConnection();
+  await seedAdmin();
+})();
 
 // Routes
 app.use('/api/auth', require('./routes/authRoutes'));
