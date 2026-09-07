@@ -4,6 +4,25 @@ const { pool } = require('./src/config/database');
 
 const seedAdmin = async () => {
   try {
+    // Ensure Phase 6 columns & tables exist
+    await pool.query(`
+      ALTER TABLE users 
+      ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS password_reset_tokens (
+          id SERIAL PRIMARY KEY,
+          user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          token_hash VARCHAR(255) NOT NULL,
+          expires_at TIMESTAMPTZ NOT NULL,
+          used_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
     const adminEmail = process.env.ADMIN_EMAIL || 'admin@ataryouth.org';
     const adminPassword = process.env.ADMIN_PASSWORD || '1234';
     
