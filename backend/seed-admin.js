@@ -24,6 +24,12 @@ const seedAdmin = async () => {
       );
     `);
 
+    await pool.query(`
+      ALTER TABLE profiles
+      ADD COLUMN IF NOT EXISTS profile_photo_url VARCHAR(550),
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
+    `);
+
     const adminEmail = process.env.ADMIN_EMAIL || 'admin@ataryouth.org';
     const adminPassword = process.env.ADMIN_PASSWORD || '1234';
     

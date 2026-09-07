@@ -175,6 +175,7 @@ const loginUser = async (req, res) => {
     }
 
     // Generate JWT payload including must_change_password
+    const jwtSecret = process.env.JWT_SECRET || 'atar_youth_association_jwt_secret_key_2026';
     const token = jwt.sign(
       { 
         id: user.id, 
@@ -182,7 +183,7 @@ const loginUser = async (req, res) => {
         role: user.role,
         must_change_password: user.must_change_password || false
       },
-      process.env.JWT_SECRET,
+      jwtSecret,
       { expiresIn: process.env.JWT_EXPIRE || '7d' }
     );
 
@@ -214,7 +215,7 @@ const loginUser = async (req, res) => {
 
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({ success: false, message: 'Login failed' });
+    res.status(500).json({ success: false, message: 'Login failed', details: error.message });
   }
 };
 
