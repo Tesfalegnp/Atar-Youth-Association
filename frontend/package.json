@@ -33,7 +33,7 @@
     "preview": "vite preview",
     "lint": "eslint src",
     "predeploy": "npm run build",
-    "deploy": "gh-pages -d dist"
+    "deploy": "rm -rf /tmp/gh-pages-build && mkdir -p /tmp/gh-pages-build && cp -r dist/* /tmp/gh-pages-build/ && cd /tmp/gh-pages-build && git init && git checkout -b gh-pages && git add . && git commit -m 'Deploy to GitHub Pages' && git remote add origin git@github.com:nyokbiliu/Atar-Youth-Association.git && git push --force origin gh-pages"
   },
   "engines": {
     "node": ">=24.13.1",
