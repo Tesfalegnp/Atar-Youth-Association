@@ -10,7 +10,10 @@ import { organizationInfo } from '../data/siteContent';
 const resolveImageUrl = (url) => {
   if (!url) return null;
   if (url.startsWith('http')) return url;
-  return `http://localhost:5000${url.startsWith('/') ? url : `/${url}`}`;
+  const backendUrl = import.meta.env.VITE_API_URL 
+    ? import.meta.env.VITE_API_URL.replace(/\/api\/?$/, '') 
+    : 'http://localhost:5000';
+  return `${backendUrl}${url.startsWith('/') ? url : `/${url}`}`;
 };
 
 const Navbar = ({ isAuthenticated, user, onLogout }) => {

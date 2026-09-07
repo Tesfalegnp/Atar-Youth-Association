@@ -7,7 +7,10 @@ import { useNavigate } from 'react-router-dom';
 // Helper: Resolve full image URL for backend-served images
 const resolveImageUrl = (url) => {
   if (!url || url.startsWith('http')) return url;
-  return `http://localhost:5000${url.startsWith('/') ? url : `/${url}`}`;
+  const backendUrl = import.meta.env.VITE_API_URL 
+    ? import.meta.env.VITE_API_URL.replace(/\/api\/?$/, '') 
+    : 'http://localhost:5000';
+  return `${backendUrl}${url.startsWith('/') ? url : `/${url}`}`;
 };
 
 const Profile = () => {
