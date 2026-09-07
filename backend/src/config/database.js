@@ -43,13 +43,15 @@ pool.on('error', (err) => {
 // Test database connection
 const testConnection = async () => {
   try {
-    const res = await pool.query('SELECT current_database(), current_user');
+    const res = await pool.query('SELECT current_database(), current_user, NOW()');
     const dbName = res.rows[0].current_database;
     const dbUser = res.rows[0].current_user;
+    const dbTime = res.rows[0].now;
 
     console.log('✅ PostgreSQL / Supabase database connected successfully');
     console.log(`🗄️  Database: ${dbName}`);
     console.log(`👤 User: ${dbUser}`);
+    console.log(`⏰ Time: ${dbTime}`);
   } catch (error) {
     console.error('❌ Database connection failed:');
     console.error(`   Error: ${error.message}`);
